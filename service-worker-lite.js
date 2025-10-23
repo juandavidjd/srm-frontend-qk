@@ -1,90 +1,102 @@
-// ===============================
-// 🧩 SERVICE WORKER LITE – SRM-QK v1.0
-// ===============================
+// 🧩 SRM-QK v1.1.4 — Service Worker Media-Enhanced
+// Cachea HTML, íconos y ahora también videos (modo offline optimizado)
 
-// Nombre del caché
-const CACHE_NAME = "srm-qk-lite-v1";
+const CACHE_NAME = "srm-qk-cache-v1.1.4";
+const MEDIA_CACHE = "srm-qk-media-cache-v1.1.4";
 
-// Archivos esenciales para la PWA (solo los livianos)
-const CORE_ASSETS = [
-  "/QK/",
-  "/QK/index.html",
-  "/QK/site.webmanifest",
+const STATIC_ASSETS = [
+  "/srm-frontend-qk/",
+  "/srm-frontend-qk/index.html",
   "/QK/favicon.ico",
-  "/QK/favicon-16x16.png",
+  "/QK/apple-touch-icon.png",
   "/QK/favicon-32x32.png",
+  "/QK/favicon-16x16.png",
   "/QK/android-chrome-192x192.png",
   "/QK/android-chrome-512x512.png",
-  "/QK/apple-touch-icon.png"
+  "/QK/site.webmanifest"
 ];
 
-// ===============================
-// 📦 INSTALACIÓN
-// ===============================
+// 🧱 Instalar: cachear archivos estáticos
 self.addEventListener("install", (event) => {
-  console.log("📦 Instalando SRM-QK Lite Service Worker...");
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(CORE_ASSETS))
+      .then(cache => cache.addAll(STATIC_ASSETS))
       .then(() => self.skipWaiting())
-      .catch(err => console.error("❌ Error al cachear activos iniciales:", err))
   );
 });
 
-// ===============================
-// ⚙️ ACTIVACIÓN
-// ===============================
+// ♻️ Activar: limpiar versiones viejas
 self.addEventListener("activate", (event) => {
-  console.log("⚙️ Activando nuevo SW...");
   event.waitUntil(
     caches.keys().then(keys =>
       Promise.all(
-        keys.filter(k => k !== CACHE_NAME).map(k => {
-          console.log("🗑️ Eliminando caché viejo:", k);
-          return caches.delete(k);
+        keys.map(key => {
+          if (key !== CACHE_NAME && key !== MEDIA_CACHE) {
+            return caches.delete(key);
+          }
         })
       )
-    )
+    ).then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
-// ===============================
-// 🌐 ESTRATEGIA: CACHE FIRST
-// ===============================
+// ⚡ Fetch: estrategia híbrida
 self.addEventListener("fetch", (event) => {
-  const req = event.request;
+  const url = new URL(event.request.url);
 
-  // 🔒 Ignorar peticiones POST (ej. /api/responder)
-  if (req.method === "POST") return;
+  // 1️⃣ Ignorar llamadas a la API del backend (se hacen siempre online)
+  if (url.pathname.startsWith("/api/")) return;
 
-  // 🔹 Estrategia cache-first para documentos e imágenes
+  // 2️⃣ Videos MP4 → cache temporal especial
+  if (url.origin.includes("onrender.com") && url.pathname.endsWith(".mp4")) {
+    event.respondWith(cacheVideo(event.request));
+    return;
+  }
+
+  // 3️⃣ Otros recursos → cache first con fallback
   event.respondWith(
-    caches.match(req).then(cacheRes => {
-      if (cacheRes) return cacheRes;
-      return fetch(req)
-        .then(networkRes => {
-          // Cache dinámico solo para recursos estáticos pequeños
-          if (req.url.startsWith("https://somosrepuestosmotos-coder.github.io/QK/")) {
-            caches.open(CACHE_NAME).then(cache => cache.put(req, networkRes.clone()));
+    caches.match(event.request)
+      .then((cached) => cached || fetch(event.request)
+        .then((response) => {
+          if (response && response.status === 200 && response.type === "basic") {
+            const cloned = response.clone();
+            caches.open(CACHE_NAME).then(cache => cache.put(event.request, cloned));
           }
-          return networkRes;
+          return response;
         })
-        .catch(() => {
-          // 🧭 Fallback offline
-          if (req.destination === "document") {
-            return caches.match("/QK/index.html");
-          }
-        });
-    })
+        .catch(() => caches.match("/srm-frontend-qk/index.html"))
+      )
   );
 });
 
-// ===============================
-// 🧹 EVENTUAL ACTUALIZACIÓN AUTOMÁTICA
-// ===============================
-self.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "SKIP_WAITING") {
-    self.skipWaiting();
+// 🎞️ Función: cachear videos de Render inteligentemente
+async function cacheVideo(request) {
+  const cache = await caches.open(MEDIA_CACHE);
+  const cachedResponse = await cache.match(request);
+
+  // Si ya está cacheado, úsalo
+  if (cachedResponse) return cachedResponse;
+
+  try {
+    const fetchResponse = await fetch(request);
+    // Guardar copia solo si la respuesta es correcta
+    if (fetchResponse.ok) {
+      cache.put(request, fetchResponse.clone());
+      limitMediaCacheSize(MEDIA_CACHE, 8); // máximo 8 videos guardados
+    }
+    return fetchResponse;
+  } catch (error) {
+    console.warn("⚠️ Video no disponible offline:", request.url);
+    return cachedResponse || new Response("Video no disponible offline", { status: 503 });
   }
-});
+}
+
+// 🧹 Mantener cache de videos limitada
+async function limitMediaCacheSize(name, maxItems) {
+  const cache = await caches.open(name);
+  const keys = await cache.keys();
+  if (keys.length > maxItems) {
+    await cache.delete(keys[0]);
+    limitMediaCacheSize(name, maxItems);
+  }
+}
